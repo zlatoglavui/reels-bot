@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fonts-liberation \
     fonts-dejavu-core \
+    libass-dev \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
