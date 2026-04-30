@@ -1,6 +1,5 @@
 """
-main.py — Reels Bot entry point (Railway-ready)
-новость → сценарий → аудио → видео → сохранить
+main.py — Reels Bot (Railway + PostgreSQL)
 """
 import asyncio
 import os
@@ -15,28 +14,15 @@ from loguru import logger
 
 load_dotenv()
 
-# Создаём папки при старте
 for d in ["/app/output", "/app/audio", "/app/backgrounds"]:
     Path(d).mkdir(parents=True, exist_ok=True)
 
-# Логирование
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 logger.remove()
-logger.add(
-    sys.stdout,
-    level=LOG_LEVEL,
-    colorize=False,
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}",
-)
-logger.add(
-    "/app/output/reels.log",
-    level="DEBUG",
-    rotation="10 MB",
-    retention="14 days",
-)
+logger.add(sys.stdout, level=LOG_LEVEL, colorize=False,
+           format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
 
-# Проверка переменных
-REQUIRED = ["GROQ_API_KEY", "PEXELS_API_KEY"]
+REQUIRED = ["GROQ_API_KEY", "PEXELS_API_KEY", "DATABASE_URL"]
 missing = [v for v in REQUIRED if not os.getenv(v)]
 if missing:
     logger.error(f"Отсутствуют переменные: {missing}")
@@ -67,7 +53,6 @@ async def main():
     scheduler.start()
     logger.info(f"Планировщик запущен — каждые {interval} минут")
 
-    # Первый запуск сразу
     await pipeline.run_once()
 
     stop_event = asyncio.Event()

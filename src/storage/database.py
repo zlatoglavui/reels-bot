@@ -1,100 +1,110 @@
 """
-storage/database.py — Читает опубликованные новости из БД новостного бота
-и ведёт собственный учёт сгенерированных видео
+storage/database.py — PostgreSQL для Reels Bot
+Читает опубликованные новости из общей БД (той же что у News Bot)
 """
 import os
 from datetime import datetime
 from typing import Optional
-import aiosqlite
+import asyncpg
 from loguru import logger
-
-NEWS_DB   = os.getenv("NEWS_DB_PATH", "/app/data/finews.db")
-REELS_DB  = os.getenv("REELS_DB_PATH", "/app/output/reels.db")
 
 CREATE_REELS_TABLES = """
 CREATE TABLE IF NOT EXISTS reels (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     article_id   INTEGER,
     title        TEXT,
     script       TEXT,
     audio_path   TEXT,
     video_path   TEXT,
     status       TEXT DEFAULT 'pending',
-    -- pending | audio_done | video_done | done | error
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
     error_msg    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_reels_status ON reels(status);
+CREATE INDEX IF NOT EXISTS idx_reels_status  ON reels(status);
 CREATE INDEX IF NOT EXISTS idx_reels_article ON reels(article_id);
 """
 
 
 class ReelsDatabase:
     def __init__(self):
-        self._conn: Optional[aiosqlite.Connection] = None
+        url = os.getenv("DATABASE_URL", "")
+        if not url:
+            raise ValueError("DATABASE_URL не задан")
+        self.url = url.replace("postgres://", "postgresql://", 1)
+        self._pool: Optional[asyncpg.Pool] = None
 
     async def connect(self):
-        os.makedirs(os.path.dirname(REELS_DB), exist_ok=True)
-        self._conn = await aiosqlite.connect(REELS_DB)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.executescript(CREATE_REELS_TABLES)
-        await self._conn.commit()
-        logger.info(f"Reels БД подключена: {REELS_DB}")
+        self._pool = await asyncpg.create_pool(
+            self.url, min_size=1, max_size=3,
+            command_timeout=30, ssl="require",
+        )
+        async with self._pool.acquire() as conn:
+            await conn.execute(CREATE_REELS_TABLES)
+        logger.info("PostgreSQL (Reels) подключена ✓")
 
     async def close(self):
-        if self._conn:
-            await self._conn.close()
+        if self._pool:
+            await self._pool.close()
 
     async def reel_exists(self, article_id: int) -> bool:
-        async with self._conn.execute(
-            "SELECT 1 FROM reels WHERE article_id = ?", (article_id,)
-        ) as cur:
-            return await cur.fetchone() is not None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM reels WHERE article_id=$1", article_id
+            )
+            return row is not None
 
     async def create_reel(self, article_id: int, title: str) -> int:
-        async with self._conn.execute(
-            "INSERT INTO reels (article_id, title) VALUES (?, ?)",
-            (article_id, title),
-        ) as cur:
-            await self._conn.commit()
-            return cur.lastrowid
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO reels (article_id, title) VALUES ($1,$2) RETURNING id",
+                article_id, title,
+            )
+            return row["id"]
 
     async def update_reel(self, reel_id: int, **kwargs):
         if not kwargs:
             return
-        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        sets = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(kwargs))
         vals = list(kwargs.values()) + [reel_id]
-        await self._conn.execute(
-            f"UPDATE reels SET {sets} WHERE id = ?", vals
-        )
-        await self._conn.commit()
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE reels SET {sets} WHERE id = ${len(vals)}", *vals
+            )
 
     async def count_today(self) -> int:
-        async with self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM reels WHERE date(created_at) = date('now') AND status = 'done'"
-        ) as cur:
-            row = await cur.fetchone()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM reels WHERE created_at >= CURRENT_DATE AND status='done'"
+            )
             return row["cnt"] if row else 0
 
 
 class NewsReader:
-    """Читает опубликованные статьи из БД новостного бота."""
+    """Читает опубликованные статьи из общей PostgreSQL БД."""
+
+    def __init__(self):
+        url = os.getenv("DATABASE_URL", "")
+        self.url = url.replace("postgres://", "postgresql://", 1)
 
     async def get_recent_published(self, limit: int = 20) -> list[dict]:
-        """Возвращает последние опубликованные статьи."""
         try:
-            async with aiosqlite.connect(NEWS_DB) as conn:
-                conn.row_factory = aiosqlite.Row
-                async with conn.execute(
+            pool = await asyncpg.create_pool(
+                self.url, min_size=1, max_size=2,
+                command_timeout=15, ssl="require",
+            )
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
                     """SELECT id, title, raw_text, url, published
                        FROM articles
                        WHERE status = 'published'
                        ORDER BY fetched_at DESC
-                       LIMIT ?""",
-                    (limit,),
-                ) as cur:
-                    rows = await cur.fetchall()
-                    return [dict(r) for r in rows]
+                       LIMIT $1""",
+                    limit,
+                )
+            await pool.close()
+            result = [dict(r) for r in rows]
+            logger.info(f"NewsReader: получено {len(result)} опубликованных статей")
+            return result
         except Exception as e:
-            logger.error(f"Ошибка чтения news БД: {e}")
+            logger.error(f"Ошибка чтения новостей из БД: {e}")
             return []
