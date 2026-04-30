@@ -85,11 +85,12 @@ async def run_ffmpeg(cmd: list[str], label: str = "") -> bool:
 
 
 async def make_background(duration: float, output_path: str) -> bool:
+    """Тёмный градиентный фон."""
     return await run_ffmpeg([
         "ffmpeg", "-y",
         "-f", "lavfi",
-        "-i", f"color=c=0x0d0d1a:size={WIDTH}x{HEIGHT}:rate=30:duration={duration}",
-        "-vf", "vignette=PI/4",
+        "-i", f"color=c=0x0d0d1a:size={WIDTH}x{HEIGHT}:rate=30",
+        "-t", str(duration),
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p",
         output_path,
@@ -116,8 +117,7 @@ async def compose_video(
             "-i", background_path,
             "-vf", (
                 f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={WIDTH}:{HEIGHT},"
-                f"vignette=PI/4"
+                f"crop={WIDTH}:{HEIGHT}"
             ),
             "-t", str(duration),
             "-r", "30",
@@ -134,7 +134,7 @@ async def compose_video(
         logger.error("Не удалось создать фон")
         return False
 
-    # Шаг 2: субтитры
+    # Шаг 2: субтитры через SRT
     srt_path = output_path.replace(".mp4", ".srt")
     phrases  = split_into_phrases(script.get("full_text", ""), words_per_phrase=4)
     time_per = duration / max(len(phrases), 1)
