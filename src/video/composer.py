@@ -187,8 +187,20 @@ async def compose_video(
         bg_input  = ["-i", tmp_bg]
         bg_filter = full_vf
 
-    # Аудио: голос + музыка (если есть)
+    # Аудио: голос + музыка (проверяем что трек длиннее 5 секунд)
+    music_ok = False
     if music:
+        try:
+            from mutagen.mp3 import MP3
+            music_duration = MP3(music).info.length
+            if music_duration >= 5.0:
+                music_ok = True
+            else:
+                logger.warning(f"Музыка слишком короткая ({music_duration:.1f}с) — пропускаем")
+        except Exception:
+            pass
+
+    if music_ok:
         audio_inputs = ["-i", audio_path, "-i", music]
         audio_filter = (
             f"[1:a]volume=0.12,atrim=0:{duration}[bg];"
