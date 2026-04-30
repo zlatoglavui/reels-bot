@@ -1,5 +1,5 @@
 """
-video/composer.py — Сборка видео через FFmpeg (максимально совместимая версия)
+video/composer.py — Минималистичная сборка видео через FFmpeg
 """
 import asyncio
 import os
@@ -9,76 +9,32 @@ from loguru import logger
 
 WIDTH  = 1080
 HEIGHT = 1920
-FONT   = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_FALLBACK = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/output")
 MUSIC_DIR  = "/app/music"
 
 
-def get_font() -> str:
-    for f in [FONT, FONT_FALLBACK]:
-        if os.path.exists(f):
-            return f
-    return "DejaVuSans-Bold"
-
-
 def split_into_phrases(text: str, words_per_phrase: int = 4) -> list[str]:
     words = text.split()
-    phrases = []
-    for i in range(0, len(words), words_per_phrase):
-        phrases.append(" ".join(words[i:i + words_per_phrase]))
-    return phrases
+    return [
+        " ".join(words[i:i + words_per_phrase])
+        for i in range(0, len(words), words_per_phrase)
+    ]
 
 
-def escape_ffmpeg(text: str) -> str:
-    text = text.replace("\\", "\\\\")
-    text = text.replace("'",  "\\'")
-    text = text.replace(":",  "\\:")
-    text = text.replace(",",  "\\,")
-    text = text.replace("[",  "\\[")
-    text = text.replace("]",  "\\]")
-    text = text.replace("%",  "\\%")
-    for ch in "!?;@#$^&*()":
-        text = text.replace(ch, "")
-    return text.strip()
-
-
-def build_subtitle_filter(phrases: list[str], duration: float, font: str) -> str:
-    if not phrases:
-        return ""
-    time_per = duration / len(phrases)
-    filters = []
-    for i, phrase in enumerate(phrases):
-        start = i * time_per
-        end   = start + time_per
-        safe  = escape_ffmpeg(phrase)
-        if not safe:
-            continue
-        filters.append(
-            f"drawtext=fontfile='{font}':text='{safe}'"
-            f":fontsize=68:fontcolor=white"
-            f":shadowcolor=black@0.8:shadowx=3:shadowy=3"
-            f":x=(w-text_w)/2:y=(h-text_h)/2+150"
-            f":enable='between(t,{start:.2f},{end:.2f})'"
-        )
-    return ",".join(filters)
-
-
-def build_progress_bar(duration: float) -> str:
-    bar_y = HEIGHT - 40
-    return (
-        f"drawbox=x=0:y={bar_y}:w={WIDTH}:h=8:color=white@0.3:t=fill,"
-        f"drawbox=x=0:y={bar_y}"
-        f":w='min({WIDTH}\\,{WIDTH}*t/{duration:.2f})'"
-        f":h=8:color=white@0.9:t=fill"
+def clean_text(text: str) -> str:
+    allowed = set(
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789 .-+"
     )
+    return "".join(c for c in text if c in allowed).strip()
 
 
 def get_music_file() -> str | None:
     music_dir = Path(MUSIC_DIR)
     if not music_dir.exists():
         return None
-    tracks = list(music_dir.glob("*.mp3")) + list(music_dir.glob("*.m4a"))
+    tracks = list(music_dir.glob("*.mp3"))
     if not tracks:
         return None
     track = str(random.choice(tracks))
@@ -114,7 +70,7 @@ async def download_music():
             logger.warning(f"Музыка {name} недоступна: {e}")
 
 
-async def run_ffmpeg(cmd: list[str]) -> bool:
+async def run_ffmpeg(cmd: list[str], label: str = "") -> bool:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -122,7 +78,8 @@ async def run_ffmpeg(cmd: list[str]) -> bool:
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        logger.error(f"FFmpeg ошибка: {stderr.decode()[-400:]}")
+        err = stderr.decode(errors="replace")
+        logger.error(f"FFmpeg [{label}] ошибка: {err[-300:]}")
         return False
     return True
 
@@ -131,12 +88,11 @@ async def make_background(duration: float, output_path: str) -> bool:
     return await run_ffmpeg([
         "ffmpeg", "-y",
         "-f", "lavfi",
-        "-i", f"color=c=0x0d0d1a:size={WIDTH}x{HEIGHT}:rate=25",
-        "-t", str(duration),
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-i", f"color=c=0x0d0d1a:size={WIDTH}x{HEIGHT}:rate=25:duration={duration}",
+        "-c:v", "libx264", "-preset", "ultrafast",
         "-pix_fmt", "yuv420p",
         output_path,
-    ])
+    ], "background")
 
 
 async def compose_video(
@@ -147,81 +103,80 @@ async def compose_video(
     duration: float,
 ) -> bool:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    font     = get_font()
-    phrases  = split_into_phrases(script.get("full_text", ""), words_per_phrase=4)
-    sub_filt = build_subtitle_filter(phrases, duration, font)
-    prog_bar = build_progress_bar(duration)
-    hook     = escape_ffmpeg(script.get("hook", ""))
-    music    = get_music_file()
-
-    overlay = f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=black@0.45:t=fill"
-    parts   = [overlay]
-
-    if hook:
-        parts.append(
-            f"drawtext=fontfile='{font}':text='{hook}'"
-            f":fontsize=50:fontcolor=yellow"
-            f":shadowcolor=black@0.9:shadowx=2:shadowy=2"
-            f":x=(w-text_w)/2:y=160"
-        )
-
-    if sub_filt:
-        parts.append(sub_filt)
-
-    parts.append(prog_bar)
-    parts.append(
-        f"drawtext=fontfile='{font}':text='propustilnews'"
-        f":fontsize=32:fontcolor=white@0.5"
-        f":x=(w-text_w)/2:y={HEIGHT - 80}"
-    )
-
-    vf = ",".join(parts)
+    music = get_music_file()
 
     # Шаг 1: фон
     tmp_bg = output_path.replace(".mp4", "_bg.mp4")
-    bg_ok  = False
+    bg_ok = False
 
     if background_path and os.path.exists(background_path):
         bg_ok = await run_ffmpeg([
             "ffmpeg", "-y",
             "-i", background_path,
-            "-vf", (
-                f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={WIDTH}:{HEIGHT}"
-            ),
+            "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}",
             "-t", str(duration),
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-c:v", "libx264", "-preset", "ultrafast",
             "-pix_fmt", "yuv420p", "-an",
             tmp_bg,
-        ])
+        ], "bg_transcode")
 
     if not bg_ok:
-        logger.info("Градиентный фон")
+        logger.info("Используем градиентный фон")
         bg_ok = await make_background(duration, tmp_bg)
 
     if not bg_ok:
         logger.error("Не удалось создать фон")
         return False
 
-    # Шаг 2: текст поверх фона
+    # Шаг 2: субтитры через SRT
+    srt_path = output_path.replace(".mp4", ".srt")
+    phrases  = split_into_phrases(script.get("full_text", ""), words_per_phrase=4)
+    time_per = duration / max(len(phrases), 1)
+
+    def fmt_time(s):
+        h = int(s // 3600)
+        m = int((s % 3600) // 60)
+        sec = s % 60
+        return f"{h:02d}:{m:02d}:{sec:06.3f}".replace(".", ",")
+
+    srt_lines = []
+    for i, phrase in enumerate(phrases):
+        safe = clean_text(phrase)
+        if not safe:
+            continue
+        srt_lines += [
+            str(i + 1),
+            f"{fmt_time(i * time_per)} --> {fmt_time((i + 1) * time_per)}",
+            safe,
+            "",
+        ]
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(srt_lines))
+
     tmp_txt = output_path.replace(".mp4", "_txt.mp4")
-    ok = await run_ffmpeg([
+    subtitle_ok = await run_ffmpeg([
         "ffmpeg", "-y",
         "-i", tmp_bg,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-vf", (
+            f"subtitles={srt_path}:force_style='"
+            f"FontSize=48,PrimaryColour=&Hffffff,"
+            f"OutlineColour=&H000000,Outline=2,Alignment=5'"
+        ),
+        "-c:v", "libx264", "-preset", "fast",
         "-pix_fmt", "yuv420p", "-an",
         tmp_txt,
-    ])
+    ], "subtitles")
 
-    if os.path.exists(tmp_bg):
-        os.remove(tmp_bg)
+    if not subtitle_ok:
+        logger.warning("Субтитры недоступны — видео без текста")
+        tmp_txt = tmp_bg
 
-    if not ok:
-        return False
+    for f in [tmp_bg, srt_path]:
+        if f != tmp_txt and os.path.exists(f):
+            os.remove(f)
 
-    # Шаг 3: добавляем аудио
+    # Шаг 3: аудио
     if music:
         ok = await run_ffmpeg([
             "ffmpeg", "-y",
@@ -234,7 +189,7 @@ async def compose_video(
             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
             "-t", str(duration), "-movflags", "+faststart",
             output_path,
-        ])
+        ], "audio_mix")
     else:
         ok = await run_ffmpeg([
             "ffmpeg", "-y",
@@ -244,7 +199,7 @@ async def compose_video(
             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
             "-t", str(duration), "-movflags", "+faststart",
             output_path,
-        ])
+        ], "audio_only")
 
     if os.path.exists(tmp_txt):
         os.remove(tmp_txt)
