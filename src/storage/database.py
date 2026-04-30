@@ -1,6 +1,5 @@
 """
 storage/database.py — PostgreSQL для Reels Bot
-Читает опубликованные новости из общей БД (той же что у News Bot)
 """
 import os
 from datetime import datetime
@@ -70,6 +69,14 @@ class ReelsDatabase:
             await conn.execute(
                 f"UPDATE reels SET {sets} WHERE id = ${len(vals)}", *vals
             )
+
+    async def reset_error_reels(self) -> int:
+        """Удаляет reels со статусом error для повторной обработки."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM reels WHERE status = 'error'"
+            )
+            return int(result.split()[-1])
 
     async def count_today(self) -> int:
         async with self._pool.acquire() as conn:
