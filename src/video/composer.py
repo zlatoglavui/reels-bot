@@ -1,6 +1,6 @@
 """
 video/composer.py — Сборка финального видео через FFmpeg
-Формат: 1080x1920 (9:16) с прогресс-баром и фоновой музыкой
+Формат: 1080x1920 (9:16) с прогресс-баром
 """
 import asyncio
 import os
@@ -32,14 +32,17 @@ def split_into_phrases(text: str, words_per_phrase: int = 4) -> list[str]:
 
 
 def escape_ffmpeg(text: str) -> str:
-    return (text
-            .replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace(":", "\\:")
-            .replace(",", "\\,")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-            .replace("%", "\\%"))
+    """Удаляет/экранирует спецсимволы для FFmpeg drawtext."""
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'",  "\\'")
+    text = text.replace(":",  "\\:")
+    text = text.replace(",",  "\\,")
+    text = text.replace("[",  "\\[")
+    text = text.replace("]",  "\\]")
+    text = text.replace("%",  "\\%")
+    for ch in "!?;@#$^&*()":
+        text = text.replace(ch, "")
+    return text.strip()
 
 
 def build_subtitle_filter(phrases: list[str], duration: float, font: str) -> str:
@@ -51,6 +54,8 @@ def build_subtitle_filter(phrases: list[str], duration: float, font: str) -> str
         start = i * time_per
         end   = start + time_per
         safe  = escape_ffmpeg(phrase)
+        if not safe:
+            continue
         filters.append(
             f"drawtext=fontfile='{font}':text='{safe}'"
             f":fontsize=72:fontcolor=white"
@@ -58,7 +63,7 @@ def build_subtitle_filter(phrases: list[str], duration: float, font: str) -> str
             f":x=(w-text_w)/2:y=(h-text_h)/2+150"
             f":enable='between(t,{start:.2f},{end:.2f})'"
         )
-    return ",".join(filters)
+    return ",".join(filters) if filters else "null"
 
 
 def build_progress_bar(duration: float) -> str:
@@ -123,7 +128,7 @@ async def create_gradient_background(duration: float, output_path: str) -> bool:
         "ffmpeg", "-y",
         "-f", "lavfi",
         "-i", f"color=c=0x0a0a2e:size={WIDTH}x{HEIGHT}:rate=30:duration={duration}",
-        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
         "-t", str(duration), output_path
     ]
     return await run_ffmpeg(cmd)
@@ -152,51 +157,47 @@ async def compose_video(
         f":shadowcolor=black@0.9:shadowx=2:shadowy=2"
         f":x=(w-text_w)/2:y=160"
         f":enable='between(t,0,{duration:.2f})'"
-    )
+    ) if hook else ""
     watermark = (
-        f"drawtext=fontfile='{font}':text='@propustilnews'"
+        f"drawtext=fontfile='{font}':text='propustilnews'"
         f":fontsize=34:fontcolor=white@0.5"
         f":x=(w-text_w)/2:y={HEIGHT - 80}"
     )
 
-    full_vf = f"{overlay},{hook_filt},{sub_filt},{prog_bar},{watermark}"
+    vf_parts = [p for p in [overlay, hook_filt, sub_filt, prog_bar, watermark] if p and p != "null"]
+    full_vf  = ",".join(vf_parts)
 
-    # Готовим фон — перекодируем в совместимый формат
+    # Фон — сначала пробуем Pexels, fallback на градиент
     tmp_bg = output_path.replace(".mp4", "_bg.mp4")
+    bg_ok  = False
+
     if background_path and os.path.exists(background_path):
-        transcode_ok = await run_ffmpeg([
+        bg_ok = await run_ffmpeg([
             "ffmpeg", "-y",
-            "-stream_loop", "-1",
             "-i", background_path,
-            "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}",
+            "-vf", (
+                f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={WIDTH}:{HEIGHT},"
+                f"tpad=stop_mode=loop:stop_duration={int(duration)+5}"
+            ),
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-an",
-            "-t", str(duration + 2),
+            "-an", "-t", str(duration + 2),
             tmp_bg,
         ])
-        if transcode_ok:
-            bg_input  = ["-i", tmp_bg]
-            bg_filter = full_vf
-        else:
-            logger.warning("Перекодирование фона не удалось — используем градиент")
-            await create_gradient_background(duration, tmp_bg)
-            bg_input  = ["-i", tmp_bg]
-            bg_filter = full_vf
-    else:
-        await create_gradient_background(duration, tmp_bg)
-        bg_input  = ["-i", tmp_bg]
-        bg_filter = full_vf
 
-    # Аудио: голос + музыка (проверяем что трек длиннее 5 секунд)
+    if not bg_ok:
+        logger.info("Используем градиентный фон")
+        await create_gradient_background(duration + 2, tmp_bg)
+
+    # Аудио: проверяем длину музыки
     music_ok = False
     if music:
         try:
             from mutagen.mp3 import MP3
-            music_duration = MP3(music).info.length
-            if music_duration >= 5.0:
+            if MP3(music).info.length >= 5.0:
                 music_ok = True
             else:
-                logger.warning(f"Музыка слишком короткая ({music_duration:.1f}с) — пропускаем")
+                logger.warning("Музыка слишком короткая — пропускаем")
         except Exception:
             pass
 
@@ -206,17 +207,18 @@ async def compose_video(
             f"[1:a]volume=0.12,atrim=0:{duration}[bg];"
             f"[0:a][bg]amix=inputs=2:duration=first[aout]"
         )
-        audio_map   = ["-map", "0:v", "-map", "[aout]"]
-        audio_extra = ["-filter_complex", audio_filter] + audio_map
+        audio_extra = [
+            "-filter_complex", audio_filter,
+            "-map", "0:v", "-map", "[aout]"
+        ]
     else:
         audio_inputs = ["-i", audio_path]
         audio_extra  = ["-map", "0:v", "-map", "1:a"]
 
     cmd = (
-        ["ffmpeg", "-y"]
-        + bg_input
+        ["ffmpeg", "-y", "-i", tmp_bg]
         + audio_inputs
-        + ["-vf", bg_filter]
+        + ["-vf", full_vf]
         + audio_extra
         + [
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
