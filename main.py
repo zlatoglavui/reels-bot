@@ -14,7 +14,7 @@ from loguru import logger
 
 load_dotenv()
 
-for d in ["/app/output", "/app/audio", "/app/backgrounds"]:
+for d in ["/app/output", "/app/audio", "/app/backgrounds", "/app/music"]:
     Path(d).mkdir(parents=True, exist_ok=True)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -26,7 +26,6 @@ REQUIRED = ["GROQ_API_KEY", "PEXELS_API_KEY", "DATABASE_URL"]
 missing = [v for v in REQUIRED if not os.getenv(v)]
 if missing:
     logger.error(f"Отсутствуют переменные: {missing}")
-    logger.error("Добавь в Railway → Variables")
     sys.exit(1)
 
 from src.pipeline import ReelsPipeline

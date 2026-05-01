@@ -1,31 +1,51 @@
 """
-script/generator.py — Генерация сценария для видео через Groq
+script/generator.py — Генерация сценария для TikTok/Reels через Groq
+Оптимизировано для перегона трафика в Telegram
 """
 import os
 import re
+import random
 from groq import AsyncGroq
 from loguru import logger
 
-SYSTEM_PROMPT = """Ты создаёшь короткие вирусные сценарии для TikTok/Reels на финансовую тему.
+# 6 разных типов хуков — чередуются чтобы не приедались
+HOOK_STYLES = [
+    "Начни с шокирующего факта с цифрой — например '${сумма} испарилось за час'",
+    "Начни с вопроса который задевает — например 'Ты знаешь куда уходят твои сбережения?'",
+    "Начни с предупреждения — например 'Стоп. Это касается каждого кто держит доллары'",
+    "Начни с интриги — например 'То что скрывают банки от обычных людей'",
+    "Начни с противоречия — например 'Все паникуют. А умные деньги делают вот что'",
+    "Начни с новости напрямую — например 'Только что произошло то что изменит рынок'",
+]
 
-Твоя задача — написать сценарий на 15–20 секунд (40–55 слов) на русском языке.
+SYSTEM_PROMPT = """Ты создаёшь короткие вирусные сценарии для TikTok и Reels на финансовую тему.
+Главная цель — заинтересовать зрителя и отправить его в Telegram канал за подробностями.
 
-СТРОГО верни только этот формат без лишних слов:
+Твоя задача — написать сценарий ровно на 15 секунд (35-40 слов) на русском языке.
 
-ХУК: [1 цепляющая строка — заставляет остановить скролл, упомяни деньги или угрозу]
-СУТЬ: [2–3 коротких предложения — главный факт с цифрами]
-ВЫВОД: [1 строка — что делать зрителю прямо сейчас]
+СТРОГО верни только этот формат:
+
+ХУК: [1 цепляющая строка]
+СУТЬ: [1-2 предложения с главным фактом и цифрами]
+ВЫВОД: [1 строка с призывом — заканчивай на "подробности в Telegram — ссылка в шапке профиля"]
 
 Правила:
-- Говори как живой человек, не как робот
-- Используй "ты", "твои деньги", "прямо сейчас"
-- Конкретные цифры если есть
-- Эмоциональный но не кликбейтный тон
-- Максимум 55 слов суммарно"""
+- Говори как живой человек с эмоцией
+- Используй "ты", "твои деньги"
+- Конкретные цифры если есть в тексте
+- Динамичный темп — короткие предложения
+- Максимум 40 слов суммарно — это критично для 15 секунд
+- {hook_style}"""
+
+CTA_PHRASES = [
+    "Все детали в Telegram — ссылка в шапке профиля",
+    "Подробный разбор в Telegram канале — там в шапке",
+    "Больше таких разборов каждый день в Telegram — ссылка в шапке",
+    "Следи за рынком вместе с нами — Telegram в шапке профиля",
+]
 
 
 def parse_script(raw: str) -> dict | None:
-    """Парсит ответ LLM в структурированный сценарий."""
     lines = raw.strip().split("\n")
     result = {"hook": "", "body": "", "conclusion": ""}
 
@@ -41,7 +61,6 @@ def parse_script(raw: str) -> dict | None:
         elif low.startswith("вывод:") or low.startswith("conclusion:"):
             result["conclusion"] = re.sub(r'^[вВ][ыЫ][вВ][оО][дД][:\s]*', '', line, flags=re.IGNORECASE).strip()
 
-    # Если парсинг не удался — берём строки по порядку
     non_empty = [l.strip() for l in lines if l.strip()]
     if not result["hook"] and len(non_empty) >= 1:
         result["hook"] = non_empty[0]
@@ -53,8 +72,14 @@ def parse_script(raw: str) -> dict | None:
     if not result["hook"]:
         return None
 
-    # Полный текст для TTS
-    result["full_text"] = f"{result['hook']} {result['body']} {result['conclusion']}".strip()
+    # Добавляем CTA если его нет в выводе
+    cta = random.choice(CTA_PHRASES)
+    conclusion = result["conclusion"]
+    if "telegram" not in conclusion.lower() and "шапк" not in conclusion.lower():
+        conclusion = cta
+    result["conclusion"] = conclusion
+
+    result["full_text"] = f"{result['hook']} {result['body']} {conclusion}".strip()
     return result
 
 
@@ -64,11 +89,20 @@ class ScriptGenerator:
         if not api_key:
             raise ValueError("GROQ_API_KEY не задан")
         self.client = AsyncGroq(api_key=api_key)
-        self.model = "llama-3.3-70b-versatile"  # Более умная модель для сценариев
+        self.model  = "llama-3.3-70b-versatile"
+        self._hook_idx = 0  # ротация хуков по порядку
+
+    def _next_hook_style(self) -> str:
+        style = HOOK_STYLES[self._hook_idx % len(HOOK_STYLES)]
+        self._hook_idx += 1
+        return style
 
     async def generate(self, article: dict) -> dict | None:
         title = article.get("title", "")
         text  = article.get("raw_text", "")[:2000]
+
+        hook_style = self._next_hook_style()
+        prompt = SYSTEM_PROMPT.replace("{hook_style}", hook_style)
 
         user_content = f"Заголовок: {title}\nТекст: {text}"
 
@@ -77,29 +111,29 @@ class ScriptGenerator:
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": prompt},
                         {"role": "user",   "content": user_content},
                     ],
-                    max_tokens=200,
-                    temperature=0.7,
+                    max_tokens=150,
+                    temperature=0.8,
                 )
-                raw = response.choices[0].message.content
+                raw    = response.choices[0].message.content
                 script = parse_script(raw)
 
                 if script:
                     logger.info(f"Сценарий готов: {title[:50]}")
-                    logger.debug(f"Хук: {script['hook']}")
+                    logger.info(f"  Хук: {script['hook']}")
                     return script
 
-                logger.warning(f"Не удалось распарсить сценарий (попытка {attempt+1})")
+                logger.warning(f"Не удалось распарсить (попытка {attempt+1})")
 
             except Exception as e:
                 err = str(e)
                 if "429" in err or "rate" in err.lower():
-                    logger.warning("Groq rate limit при генерации сценария")
+                    logger.warning("Groq rate limit")
                     import asyncio; await asyncio.sleep(30)
                 else:
-                    logger.error(f"Ошибка генерации сценария: {err[:100]}")
+                    logger.error(f"Ошибка генерации: {err[:100]}")
                     if attempt == 2:
                         return None
 

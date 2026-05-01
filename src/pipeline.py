@@ -4,7 +4,6 @@ pipeline.py — Главный оркестратор
 """
 import asyncio
 import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
@@ -27,7 +26,7 @@ class ReelsPipeline:
         self.news      = NewsReader()
         self.generator = ScriptGenerator()
         self.sender    = TelegramSender()
-        self._cycle    = 0
+        self._cycle    = 0  # счётчик циклов для ежедневной статистики
 
     async def startup(self):
         for d in [OUTPUT_DIR, "/app/backgrounds", "/app/audio", "/app/music"]:
@@ -40,6 +39,7 @@ class ReelsPipeline:
             logger.info(f"Восстановлено {recovered} reels → pending")
 
         # Очищаем кэш фонов — перескачаем свежие
+        import shutil
         bg_dir = Path("/app/backgrounds")
         if bg_dir.exists():
             shutil.rmtree(bg_dir)
@@ -87,7 +87,7 @@ class ReelsPipeline:
         await self.db.update_reel(reel_id, audio_path=audio_path, status="audio_done")
 
         # Шаг 3: Фон
-        background = await get_background(reel_id)
+        background = await get_background(reel_id, article)
 
         # Шаг 4: Видео с прогресс-баром и музыкой
         success = await compose_video(
@@ -123,7 +123,7 @@ class ReelsPipeline:
         logger.info("─" * 40)
         logger.info(f"Старт цикла #{self._cycle}: {start.strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
-        # Ежедневная статистика в 9:00 UTC
+        # Ежедневная статистика — отправляем раз в день (первый цикл после полуночи)
         if start.hour == 9 and self._cycle > 1:
             await self.sender.send_daily_stats()
 

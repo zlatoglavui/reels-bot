@@ -1,5 +1,6 @@
 """
 storage/database.py — PostgreSQL для Reels Bot
+Читает опубликованные новости из общей БД (той же что у News Bot)
 """
 import os
 from datetime import datetime
@@ -71,7 +72,7 @@ class ReelsDatabase:
             )
 
     async def reset_error_reels(self) -> int:
-        """Удаляет reels со статусом error для повторной обработки."""
+        """Сбрасывает error reels → pending для повторной обработки."""
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM reels WHERE status = 'error'"

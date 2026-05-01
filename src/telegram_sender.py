@@ -1,7 +1,10 @@
 """
-telegram_sender.py — Отправка видео в личку + команды + статистика
+telegram_sender.py — Отправка видео в личку + команды управления + статистика
+Команды: /stats, /pause, /resume
 """
+import asyncio
 import os
+import glob
 from datetime import datetime
 from pathlib import Path
 from telegram import Bot, Update
@@ -13,15 +16,16 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_OWNER_ID  = os.getenv("TELEGRAM_OWNER_ID", "")
 OUTPUT_DIR         = os.getenv("OUTPUT_DIR", "/app/output")
 AUDIO_DIR          = "/app/audio"
+# Хранить аудио не дольше N часов
 AUDIO_MAX_AGE_HOURS = int(os.getenv("AUDIO_MAX_AGE_HOURS", "24"))
 
 
 class TelegramSender:
     def __init__(self):
-        self.bot      = None
-        self.owner_id = None
-        self.paused   = False
-        self._app     = None
+        self.bot       = None
+        self.owner_id  = None
+        self.paused    = False
+        self._app      = None
 
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_OWNER_ID:
             logger.warning("TELEGRAM_BOT_TOKEN или TELEGRAM_OWNER_ID не задан — отправка отключена")
@@ -31,15 +35,19 @@ class TelegramSender:
         self.owner_id = int(TELEGRAM_OWNER_ID)
         logger.info(f"Telegram sender готов → owner_id={self.owner_id}")
 
+    # ── Отправка видео ────────────────────────────────────────
+
     async def send_video(self, video_path: str, caption: str = "") -> bool:
         if not self.bot or self.paused:
             if self.paused:
                 logger.info("Отправка на паузе — видео сохранено локально")
             return False
+
         path = Path(video_path)
         if not path.exists():
             logger.error(f"Видео не найдено: {video_path}")
             return False
+
         try:
             with open(video_path, "rb") as f:
                 await self.bot.send_document(
@@ -54,12 +62,15 @@ class TelegramSender:
             logger.error(f"Ошибка отправки: {e}")
             return False
 
+    # ── Статистика ────────────────────────────────────────────
+
     def _build_stats(self) -> str:
-        videos     = list(Path(OUTPUT_DIR).glob("*.mp4")) if Path(OUTPUT_DIR).exists() else []
-        today      = datetime.utcnow().date()
+        videos   = list(Path(OUTPUT_DIR).glob("*.mp4")) if Path(OUTPUT_DIR).exists() else []
+        today    = datetime.utcnow().date()
         today_vids = [v for v in videos if datetime.utcfromtimestamp(v.stat().st_mtime).date() == today]
         total_mb   = sum(v.stat().st_size for v in videos) / 1024 / 1024
         audio_files = list(Path(AUDIO_DIR).glob("*.mp3")) if Path(AUDIO_DIR).exists() else []
+
         return (
             f"📊 *Статистика Reels Bot*\n\n"
             f"🎬 Видео сегодня: *{len(today_vids)}*\n"
@@ -71,6 +82,7 @@ class TelegramSender:
         )
 
     async def send_daily_stats(self):
+        """Отправляет ежедневную статистику."""
         if not self.bot:
             return
         try:
@@ -83,7 +95,10 @@ class TelegramSender:
         except TelegramError as e:
             logger.error(f"Ошибка отправки статистики: {e}")
 
+    # ── Автоочистка аудио ─────────────────────────────────────
+
     def cleanup_audio(self):
+        """Удаляет аудиофайлы старше AUDIO_MAX_AGE_HOURS часов."""
         audio_dir = Path(AUDIO_DIR)
         if not audio_dir.exists():
             return
@@ -96,6 +111,8 @@ class TelegramSender:
                 deleted += 1
         if deleted:
             logger.info(f"Автоочистка: удалено {deleted} аудиофайлов")
+
+    # ── Команды бота ─────────────────────────────────────────
 
     def _is_owner(self, update: Update) -> bool:
         return str(update.effective_user.id) == str(self.owner_id)
@@ -120,17 +137,18 @@ class TelegramSender:
         if not self._is_owner(update):
             return
         self.paused = True
-        await update.message.reply_text("⏸ Отправка приостановлена. /resume чтобы возобновить.")
+        await update.message.reply_text("⏸ Отправка видео приостановлена. /resume чтобы возобновить.")
         logger.info("Отправка поставлена на паузу")
 
     async def cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not self._is_owner(update):
             return
         self.paused = False
-        await update.message.reply_text("▶️ Отправка возобновлена!")
+        await update.message.reply_text("▶️ Отправка видео возобновлена!")
         logger.info("Отправка возобновлена")
 
     async def start_polling(self):
+        """Запускает polling для команд в фоне."""
         if not self.bot:
             return
         try:

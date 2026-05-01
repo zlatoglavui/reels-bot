@@ -64,7 +64,7 @@ def select_for_reels(articles: list[dict], max_count: int = 5) -> list[dict]:
     scored = []
     for a in articles:
         s = score_article(a)
-        if s > 0:
+        if s >= 0:
             scored.append((s, a))
 
     # Сортируем по score убыванию

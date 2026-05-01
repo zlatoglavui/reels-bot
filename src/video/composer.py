@@ -1,6 +1,6 @@
 """
 video/composer.py — Сборка видео через FFmpeg
-Временные файлы пишутся в /tmp (всегда доступен на Railway)
+Оптимизировано для TikTok: 15 секунд, яркая обложка, субтитры
 """
 import asyncio
 import os
@@ -15,7 +15,8 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/output")
 MUSIC_DIR  = "/app/music"
 
 
-def split_into_phrases(text: str, words_per_phrase: int = 4) -> list[str]:
+def split_into_phrases(text: str, words_per_phrase: int = 3) -> list[str]:
+    """3 слова на фразу — оптимально для TikTok субтитров."""
     words = text.split()
     return [" ".join(words[i:i+words_per_phrase]) for i in range(0, len(words), words_per_phrase)]
 
@@ -77,9 +78,26 @@ async def run_ffmpeg(cmd: list[str], label: str = "") -> bool:
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        logger.error(f"FFmpeg [{label}] ошибка: {stderr.decode(errors='replace')[-300:]}")
+        logger.error(f"FFmpeg [{label}]: {stderr.decode(errors='replace')[-300:]}")
         return False
     return True
+
+
+async def get_audio_duration(audio_path: str) -> float:
+    """Получает точную длительность аудио через ffprobe."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+        return float(out.decode().strip())
+    except Exception:
+        return 15.0
 
 
 async def make_background(duration: float, output_path: str) -> bool:
@@ -103,21 +121,25 @@ async def compose_video(
 ) -> bool:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
+    # Получаем точную длину аудио — видео должно быть равно ей
+    real_duration = await get_audio_duration(audio_path)
+    # Добавляем 0.5 секунды паузы в конце
+    video_duration = real_duration + 0.5
+
     tid     = uuid.uuid4().hex[:8]
     tmp_bg  = f"/tmp/{tid}_bg.mp4"
     tmp_txt = f"/tmp/{tid}_txt.mp4"
     tmp_srt = f"/tmp/{tid}.srt"
     music   = get_music_file()
 
-    # Шаг 1: фон
+    # Шаг 1: фон точной длины
     bg_ok = False
-
     if background_path and os.path.exists(background_path):
         bg_ok = await run_ffmpeg([
             "ffmpeg", "-y",
             "-i", background_path,
             "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}",
-            "-t", str(duration),
+            "-t", str(video_duration),
             "-r", "30",
             "-c:v", "libx264", "-preset", "ultrafast",
             "-pix_fmt", "yuv420p", "-an",
@@ -126,15 +148,14 @@ async def compose_video(
 
     if not bg_ok:
         logger.info("Градиентный фон")
-        bg_ok = await make_background(duration, tmp_bg)
+        bg_ok = await make_background(video_duration, tmp_bg)
 
     if not bg_ok:
-        logger.error("Не удалось создать фон")
         return False
 
-    # Шаг 2: субтитры
-    phrases  = split_into_phrases(script.get("full_text", ""), words_per_phrase=4)
-    time_per = duration / max(len(phrases), 1)
+    # Шаг 2: SRT субтитры (3 слова на фразу — TikTok стиль)
+    phrases  = split_into_phrases(script.get("full_text", ""), words_per_phrase=3)
+    time_per = real_duration / max(len(phrases), 1)
 
     def fmt(s: float) -> str:
         h, rem = divmod(s, 3600)
@@ -154,10 +175,9 @@ async def compose_video(
     subtitle_ok = await run_ffmpeg([
         "ffmpeg", "-y",
         "-i", tmp_bg,
-        "-vf", f"subtitles={tmp_srt}:force_style='FontSize=52,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=3,Shadow=1,Bold=1,Alignment=5'",
+        "-vf", f"subtitles={tmp_srt}:force_style='FontSize=58,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=3,Shadow=1,Bold=1,Alignment=5,MarginV=200'",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-r", "30",
-        "-pix_fmt", "yuv420p", "-an",
+        "-r", "30", "-pix_fmt", "yuv420p", "-an",
         tmp_txt,
     ], "subtitles")
 
@@ -170,7 +190,7 @@ async def compose_video(
     if os.path.exists(tmp_srt):
         os.remove(tmp_srt)
 
-    # Шаг 3: аудио
+    # Шаг 3: аудио + музыка
     if music:
         ok = await run_ffmpeg([
             "ffmpeg", "-y",
@@ -178,10 +198,10 @@ async def compose_video(
             "-i", audio_path,
             "-i", music,
             "-filter_complex",
-            f"[2:a]volume=0.1,atrim=0:{duration}[bg];[1:a][bg]amix=inputs=2:duration=first[aout]",
+            f"[2:a]volume=0.08,atrim=0:{video_duration}[bg];[1:a][bg]amix=inputs=2:duration=first[aout]",
             "-map", "0:v", "-map", "[aout]",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-t", str(duration), "-movflags", "+faststart",
+            "-t", str(video_duration), "-movflags", "+faststart",
             output_path,
         ], "audio_mix")
     else:
@@ -191,7 +211,7 @@ async def compose_video(
             "-i", audio_path,
             "-map", "0:v", "-map", "1:a",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-t", str(duration), "-movflags", "+faststart",
+            "-t", str(video_duration), "-movflags", "+faststart",
             output_path,
         ], "audio_only")
 
@@ -200,6 +220,6 @@ async def compose_video(
 
     if ok:
         size_mb = os.path.getsize(output_path) / 1024 / 1024
-        logger.info(f"Видео готово: {Path(output_path).name} ({size_mb:.1f}MB, {duration:.1f}с)")
+        logger.info(f"Видео готово: {Path(output_path).name} ({size_mb:.1f}MB, {video_duration:.1f}с)")
 
     return ok
